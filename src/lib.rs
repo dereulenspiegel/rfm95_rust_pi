@@ -7,6 +7,7 @@ use std::io;
 use std::thread;
 use std::time::Duration;
 use std::io::{Read, Write, ErrorKind};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -296,6 +297,7 @@ pub struct RF95 {
     bw : Bandwidth,
     cr : CodingRate,
     sf : SpreadingFactor,
+    spi: Arc<Mutex<Spidev>>,
     crc_check_enabled : bool,
     implicit_header_enabled : bool,
     pwr_db : u8,
@@ -306,11 +308,27 @@ pub struct RF95 {
 }
 
 impl RF95 {
-    pub fn new(bw : Bandwidth, cr : CodingRate, sf : SpreadingFactor) -> io::Result<RF95> {
+    pub fn new(spi_path : &str,bw : Bandwidth, cr : CodingRate, sf : SpreadingFactor) -> io::Result<RF95> {
         let tmp_rst_pin = Pin::new(RST_BCM_PIN);
         tmp_rst_pin.set_direction(Direction::Low).unwrap();
         thread::sleep(Duration::from_millis(10));
         tmp_rst_pin.set_value(1).unwrap();
+
+        let mut spi = match Spidev::open(spi_path){
+            Ok(v) => v,
+            Err(e) => return Err(e),
+        };
+
+        let spi_options = SpidevOptions::new()
+            .bits_per_word(8)
+            .max_speed_hz(5_000_000)
+            .mode(SPI_MODE_0)
+            .build();
+
+        match spi.configure(&spi_options) {
+            Err(e) => return Err(e),
+            Ok(v) => v,
+        };
 
         Ok(
             RF95 {
@@ -318,6 +336,7 @@ impl RF95 {
                 bw,
                 cr,
                 sf,
+                spi : Arc::new(Mutex::new(spi)),
                 crc_check_enabled : false,
                 implicit_header_enabled : false,
                 pwr_db        : 0,
@@ -342,59 +361,59 @@ impl RF95 {
     pub fn set_channel(&mut self, ch : Channel) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.ch = ch;
-        RF95::write_register(LoraRegister::RegFrfMsb, ch.msb())?;
-        RF95::write_register(LoraRegister::RegFrfMid, ch.mid())?;
-        RF95::write_register(LoraRegister::RegFrfLsb, ch.lsb())
+        RF95::write_register(&self.spi ,LoraRegister::RegFrfMsb, ch.msb())?;
+        RF95::write_register(&self.spi, LoraRegister::RegFrfMid, ch.mid())?;
+        RF95::write_register(&self.spi, LoraRegister::RegFrfLsb, ch.lsb())
     }
 
     pub fn set_spreading_factor(&mut self, sf : SpreadingFactor) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.sf = sf;
-        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig2)?;
+        let mut tmp = RF95::read_register(&self.spi,LoraRegister::RegModemConfig2)?;
         tmp &= 0x0F;
         tmp |= sf.as_u8() << 4;
-        RF95::write_register(LoraRegister::RegModemConfig2, tmp)
+        RF95::write_register(&self.spi ,LoraRegister::RegModemConfig2, tmp)
     }
 
     pub fn set_bandwidth(&mut self, bw : Bandwidth) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.bw = bw;
-        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig1)?;
+        let mut tmp = RF95::read_register(&self.spi, LoraRegister::RegModemConfig1)?;
         tmp &= 0x0F;
         tmp |= bw.as_u8() << 4;
-        RF95::write_register(LoraRegister::RegModemConfig1, tmp)?;
+        RF95::write_register(&self.spi, LoraRegister::RegModemConfig1, tmp)?;
         Ok(())
     }
 
     pub fn set_coding_rate(&mut self, cr : CodingRate) -> io::Result<()> {
         self.set_mode(LoraMode::Sleep)?;
         self.cr = cr;
-        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig1)?;
+        let mut tmp = RF95::read_register(&self.spi, LoraRegister::RegModemConfig1)?;
         tmp &= 0xF1;
         tmp |= cr.as_u8() << 1;
-        RF95::write_register(LoraRegister::RegModemConfig1, tmp)
+        RF95::write_register(&self.spi, LoraRegister::RegModemConfig1, tmp)
     }
 
     pub fn enable_crc_check(&mut self, en : bool) -> io::Result<()> {
-        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig2)?;
+        let mut tmp = RF95::read_register(&self.spi, LoraRegister::RegModemConfig2)?;
         if en {
             tmp |= 1 << 2;
         } else {
             tmp &= !(1 << 2);
         }
         self.crc_check_enabled = en;
-        RF95::write_register(LoraRegister::RegModemConfig2, tmp)
+        RF95::write_register(&self.spi, LoraRegister::RegModemConfig2, tmp)
     }
 
     pub fn enable_implicit_header(&mut self, en : bool) -> io::Result<()> {
-        let mut tmp = RF95::read_register(LoraRegister::RegModemConfig1)?;
+        let mut tmp = RF95::read_register(&self.spi, LoraRegister::RegModemConfig1)?;
         if en {
             tmp |= 0x01;
         } else {
             tmp &= !0x01;
         }
         self.implicit_header_enabled = en;
-        RF95::write_register(LoraRegister::RegModemConfig1, tmp)
+        RF95::write_register(&self.spi, LoraRegister::RegModemConfig1, tmp)
     }
 
     pub fn set_output_power(&mut self, pwr : u8) -> io::Result<()> {
@@ -404,15 +423,15 @@ impl RF95 {
         }
         self.pwr_db = pwr;
         let out = (pwr - 2) & 0x0F;
-        let mut tmp = RF95::read_register(LoraRegister::RegPaConfig)?;
+        let mut tmp = RF95::read_register(&self.spi, LoraRegister::RegPaConfig)?;
         tmp |= 0x80;
         tmp &= 0xF0;
         tmp |= out & 0x0F;
-        RF95::write_register(LoraRegister::RegPaConfig, tmp)
+        RF95::write_register(&self.spi, LoraRegister::RegPaConfig, tmp)
     }
 
     pub fn set_mode(&mut self, m : LoraMode) -> io::Result<()> {
-        RF95::write_register(LoraRegister::RegOpMode, m.as_u8())
+        RF95::write_register(&self.spi, LoraRegister::RegOpMode, m.as_u8())
     }
 
     pub fn listen_timed(&mut self, timeout : u32) -> io::Result<Receiver<RF95EventType>> {
@@ -423,6 +442,8 @@ impl RF95 {
 
         self.thread_run.store(true, Ordering::SeqCst);
         let run = self.thread_run.clone();
+
+        let spi = Arc::clone(&self.spi);
 
         self.thread_handle = Some(thread::spawn(move || {
             input.with_exported(|| {
@@ -455,7 +476,7 @@ impl RF95 {
                 while run.load(Ordering::SeqCst) {
                     match poller.poll(10).unwrap() {
                         Some(_) => {
-                            let mut regv = match RF95::read_register(LoraRegister::RegIrqFlags) {
+                            let mut regv = match RF95::read_register(&spi, LoraRegister::RegIrqFlags) {
                                 Ok(r) => r,
                                 Err(_) => {
                                     sender.send(RF95EventType::ErrorCommBus).unwrap();
@@ -490,7 +511,7 @@ impl RF95 {
                             if regv.flag_enabled(IrqFlagMasks::ValidHeader) {
                                 regv = regv & !IrqFlagMasks::ValidHeader.as_u8();
                             }
-                            match RF95::write_register(LoraRegister::RegIrqFlags, regv) {
+                            match RF95::write_register(&spi, LoraRegister::RegIrqFlags, regv) {
                                 Ok(_) => (),
                                 Err(_) => {
                                     sender.send(RF95EventType::ErrorCommBus).unwrap();
@@ -531,15 +552,15 @@ impl RF95 {
     }
 
     pub fn get_snr(&mut self) -> io::Result<i16> {
-        Ok((RF95::read_register(LoraRegister::RegPktSnrValue)? as i16) / 4)
+        Ok((RF95::read_register(&self.spi, LoraRegister::RegPktSnrValue)? as i16) / 4)
     }
 
     pub fn get_packet_rssi(&mut self) -> io::Result<i16> {
-        Ok((RF95::read_register(LoraRegister::RegRssiValue)? as i16) - 137)
+        Ok((RF95::read_register(&self.spi, LoraRegister::RegRssiValue)? as i16) - 137)
     }
 
     pub fn get_rssi(&mut self) -> io::Result<i16> {
-        Ok((RF95::read_register(LoraRegister::RegRssiValue)? as i16) - 137)
+        Ok((RF95::read_register(&self.spi, LoraRegister::RegRssiValue)? as i16) - 137)
     }
 
     pub fn reset(&mut self) -> io::Result<()> {
@@ -555,70 +576,61 @@ impl RF95 {
     }
 
     pub fn set_dio_mapping(&mut self, df : DioFunction) -> io::Result<()> {
-        let prev_mode = RF95::read_register(LoraRegister::RegOpMode)?;
+        let prev_mode = RF95::read_register(&self.spi, LoraRegister::RegOpMode)?;
         self.set_mode(LoraMode::StandbyOokFsk)?;
-        let mut tmp = RF95::read_register(LoraRegister::RegDioMapping1)?;
+        let mut tmp = RF95::read_register(&self.spi, LoraRegister::RegDioMapping1)?;
         tmp &= 0x3F;
         if df.as_u8() == DioFunction::TxDone.as_u8() {
             tmp |= 0x40;
         }
-        RF95::write_register(LoraRegister::RegDioMapping1, tmp)?;
-        RF95::write_register(LoraRegister::RegOpMode, prev_mode)
+        RF95::write_register(&self.spi, LoraRegister::RegDioMapping1, tmp)?;
+        RF95::write_register(&self.spi, LoraRegister::RegOpMode, prev_mode)
     }
 
-    fn write_register(reg : LoraRegister, data : u8) -> io::Result<()> {
-        let mut spi = Spidev::open("/dev/spidev0.0")?;
-        let spi_options = SpidevOptions::new()
-            .bits_per_word(8)
-            .max_speed_hz(5_000_000)
-            .mode(SPI_MODE_0)
-            .build();
-        spi.configure(&spi_options)?;
+    fn write_register(spi : &Arc<Mutex<Spidev>>, reg : LoraRegister, data : u8) -> io::Result<()> {
+        let mut spi_dev = match spi.lock() {
+            Ok(v) => v,
+            Err(_) => return Err(std::io::Error::new(ErrorKind::Other, "Can't lock SPI device")),
+        };
 
-        match spi.write(&[reg.as_u8(), data]) {
+        match spi_dev.write(&[reg.as_u8(), data]) {
             Ok(_) => Ok(()),
             Err(_) => Err(io::Error::new(ErrorKind::Other, "Problem while writing to device"))
         }
     }
 
-    fn write_buffer(reg : LoraRegister, buffer : Vec<u8>) -> io::Result<()> {
-        let mut spi = Spidev::open("/dev/spidev0.0")?;
-        let spi_options = SpidevOptions::new()
-            .bits_per_word(8)
-            .max_speed_hz(5_000_000)
-            .mode(SPI_MODE_0)
-            .build();
-        spi.configure(&spi_options)?;
-
+    fn write_buffer(spi : &Arc<Mutex<Spidev>>, reg : LoraRegister, buffer : Vec<u8>) -> io::Result<()> {
         let cs_pin  = Pin::new(CS_BCM_PIN);
         cs_pin.set_direction(Direction::High).unwrap();
+
+        let mut spi_dev = match spi.lock(){
+            Ok(v) => v,
+            Err(_) => return Err(std::io::Error::new(ErrorKind::Other, "Can't lock SPI device")),
+        };
 
         let mut v2 = buffer;
         v2.insert(0, reg.as_u8());
         cs_pin.set_value(0).unwrap();
-        spi.write(&v2)?;
+        spi_dev.write(&v2)?;
         match cs_pin.set_value(1) {
             Ok(_) => Ok(()),
             Err(_) => Err(std::io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
         }
     }
 
-    fn read_register(reg : LoraRegister) -> io::Result<u8> {
-        let mut spi = Spidev::open("/dev/spidev0.0")?;
-        let spi_options = SpidevOptions::new()
-            .bits_per_word(8)
-            .max_speed_hz(5_000_000)
-            .mode(SPI_MODE_0)
-            .build();
-        spi.configure(&spi_options)?;
-
+    fn read_register(spi : &Arc<Mutex<Spidev>>, reg : LoraRegister) -> io::Result<u8> {
         let cs_pin  = Pin::new(CS_BCM_PIN);
         cs_pin.set_direction(Direction::High).unwrap();
 
+        let mut spi_dev = match spi.lock() {
+            Ok(v) => v,
+            Err(_) => return Err(std::io::Error::new(ErrorKind::Other, "Can't lock SPI device")),
+        };
+
         let mut ret: [u8; 1] = [0; 1];
         cs_pin.set_value(0).unwrap();
-        spi.write(&[reg.as_u8()])?;
-        spi.read(&mut ret).unwrap();
+        spi_dev.write(&[reg.as_u8()])?;
+        spi_dev.read(&mut ret).unwrap();
         match cs_pin.set_value(1) {
             Ok(_) => (),
             Err(_) => return Err(io::Error::new(ErrorKind::Other, "Problem setting value on gpio")),
@@ -626,22 +638,19 @@ impl RF95 {
         Ok(ret[0])
     }
 
-    fn read_buffer(reg : LoraRegister, buffer : &mut Vec<u8>, length : u8) -> io::Result<()> {
-        let mut spi = Spidev::open("/dev/spidev0.0")?;
-        let spi_options = SpidevOptions::new()
-            .bits_per_word(8)
-            .max_speed_hz(5_000_000)
-            .mode(SPI_MODE_0)
-            .build();
-        spi.configure(&spi_options)?;
+    fn read_buffer(spi : &Arc<Mutex<Spidev>>, reg : LoraRegister, buffer : &mut Vec<u8>, length : u8) -> io::Result<()> {
+        let mut spi_dev = match spi.lock(){
+            Ok(v) => v,
+            Err(_) => return Err(std::io::Error::new(ErrorKind::Other, "Can't lock SPI device")),
+        };
 
         let cs_pin  = Pin::new(CS_BCM_PIN);
         cs_pin.set_direction(Direction::High).unwrap();
 
         let mut tmp : Vec<u8> = Vec::with_capacity(length as usize);
         cs_pin.set_value(0).unwrap();
-        spi.write(&[reg.as_u8()])?;
-        spi.read(tmp.as_mut_slice())?;
+        spi_dev.write(&[reg.as_u8()])?;
+        spi_dev.read(tmp.as_mut_slice())?;
         buffer.clear();
         buffer.write(&tmp)?;
         cs_pin.set_value(1).unwrap();
