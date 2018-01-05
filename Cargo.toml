@@ -1,8 +1,20 @@
 [package]
 name = "rf95pi"
 version = "0.1.0"
-authors = ["wheelin <greg.emry@gmail.com>"]
+authors = ["wheelin <greg.emry@gmail.com>", "Till Klocke <till.klocke@gmail.com>"]
+
+[lib]
+name = "rf95pi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pkt_forwarder"
+path = "src/bin.rs"
 
 [dependencies]
-spidev = "0.3.0"
-sysfs_gpio = "0.5"
+spidev = "0.3"
+sysfs_gpio = { version = "0.5", features= ["tokio"] }
+futures = "0.1"
+tokio-core = "0.1"
+time = "0.1"
+base64 = "0.9.0"

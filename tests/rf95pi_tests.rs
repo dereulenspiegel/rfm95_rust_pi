@@ -2,7 +2,7 @@ extern crate rf95pi;
 
 #[cfg(test)]
 mod tests {
-    use super::rf95pi::{LoraRegister, Channel, SpreadingFactor, Bandwidth, CodingRate};
+    use super::rf95pi::{Bandwidth, Channel, CodingRate, LoraRegister, SpreadingFactor};
 
     #[test]
     fn register_as_u8() {
@@ -30,10 +30,12 @@ mod tests {
 
     #[test]
     fn init_test() {
-		if let Ok(radio) = super::rf95pi::RF95::new(Bandwidth::Bw250, CodingRate::Cr8, SpreadingFactor::Sf10) {
+        if let Ok(radio) =
+            super::rf95pi::RF95::new(Bandwidth::Bw250, CodingRate::Cr8, SpreadingFactor::Sf10)
+        {
 
-		} else {
-			panic!("Cannot create lora radio object");
-		}
-	}
+        } else {
+            panic!("Cannot create lora radio object");
+        }
+    }
 }
